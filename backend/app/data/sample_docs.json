@@ -1,0 +1,32 @@
+[
+  {
+    "source": "doc",
+    "title": "What is RAG?",
+    "text": "Retrieval augmented generation combines information retrieval with generative models.",
+    "url": "https://example.com/rag-intro"
+  },
+  {
+    "source": "doc",
+    "title": "FastAPI Basics",
+    "text": "FastAPI is a modern Python web framework for building APIs with type hints and Pydantic.",
+    "url": "https://example.com/fastapi"
+  },
+  {
+    "source": "doc",
+    "title": "Vector Search Lite",
+    "text": "You can approximate semantic retrieval using tf-idf and cosine similarity with a tiny in-memory index.",
+    "url": "https://example.com/vector-lite"
+  },
+  {
+    "source": "doc",
+    "title": "YouTube API Key",
+    "text": "Create a project in Google Cloud Console and enable YouTube Data API v3 to obtain an API key.",
+    "url": "https://example.com/youtube-key"
+  },
+  {
+    "source": "doc",
+    "title": "Reddit Search",
+    "text": "Public Reddit JSON endpoints can be queried with a custom user-agent for simple searches.",
+    "url": "https://example.com/reddit-json"
+  }
+]
