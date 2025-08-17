@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from .routes import health, social, auth
 import os
 
-app = FastAPI(title="SocialMediaRAG (Lite)")
+app = FastAPI(title="SocialMediaRAG")
 
 # CORS (dev-friendly)
 origins = [
