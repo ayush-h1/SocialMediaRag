@@ -1,16 +1,24 @@
 services:
   - type: web
-    name: socialmedia-rag-api
+    name: socialmedia-rag
     env: python
-    rootDir: backend
-    buildCommand: poetry install --no-root
-    startCommand: poetry run uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    rootDir: .
+    buildCommand: |
+      set -e
+      cd frontend
+      npm ci
+      npm run build
+      cd ..
+      rm -rf backend/app/static
+      mkdir -p backend/app/static
+      # copy built frontend into FastAPI's static dir (keeps dotfiles)
+      cp -r frontend/dist/. backend/app/static/
+      cd backend
+      poetry install --no-root
+    startCommand: cd backend && poetry run uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: NODE_VERSION
+        value: 20.19.4
 
-  - type: static
-    name: socialmedia-rag-frontend
-    rootDir: frontend
-    buildCommand: npm ci && npm run build
-    staticPublishPath: dist
