@@ -1,50 +1,60 @@
 # backend/app/main.py
-
 import os
+import asyncio
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from dotenv import load_dotenv
 
-# Routers
-from .routes import health, social, auth, ingest, search, trends
+log = logging.getLogger("uvicorn.error")
 
-# Load .env for local dev (Render injects env vars automatically)
-load_dotenv()
 
-app = FastAPI(title="SocialMediaRAG")
+def create_app() -> FastAPI:
+    app = FastAPI(title="SocialMediaRAG")
 
-# ---------- CORS ----------
-# Configure allowed origins via env (comma-separated). Defaults cover local dev.
-origins_env = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173"
-)
-origins = [o.strip() for o in origins_env.split(",") if o.strip()]
+    # CORS
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*", "http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-# Note: credentials cannot be combined with wildcard "*"
-allow_credentials = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() == "true"
-if "*" in origins and allow_credentials:
-    allow_credentials = False
+    # Light routers only (must be fast to import)
+    from .routes import health, auth
+    app.include_router(health.router, prefix="/api")
+    app.include_router(auth.router, prefix="/api/auth")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins or ["*"],
-    allow_credentials=allow_credentials,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    # Serve built frontend
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    os.makedirs(static_dir, exist_ok=True)
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
-# ---------- API Routers ----------
-app.include_router(health.router, prefix="/api")
-app.include_router(auth.router, prefix="/api/auth")
-app.include_router(social.router, prefix="/api")
-app.include_router(ingest.router, prefix="/api")
-app.include_router(search.router, prefix="/api")
-app.include_router(trends.router, prefix="/api")
+    @app.on_event("startup")
+    async def _lazy_mount_heavy():
+        """
+        Defer heavy imports (chromadb, sentence-transformers, etc.)
+        so Uvicorn can bind to $PORT immediately.
+        """
+        def _load():
+            try:
+                # Import here so model/vector DB loads are deferred
+                from .routes import social, search, ingest, trends
+                app.include_router(social.router, prefix="/api")
+                app.include_router(search.router, prefix="/api")
+                app.include_router(ingest.router, prefix="/api")
+                app.include_router(trends.router, prefix="/api")
+                log.info("Heavy routers mounted.")
+            except Exception:
+                log.exception("Failed to mount heavy routers")
 
-# ---------- Static frontend (served after API so /api/* wins) ----------
-# Expecting the Vite build to be copied to backend/app/static/ during build
-static_dir = os.path.join(os.path.dirname(__file__), "static")
-os.makedirs(static_dir, exist_ok=True)
-app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+        # Kick off in background; don’t block startup
+        asyncio.get_event_loop().call_soon(_load)
+
+    return app
+
+
+# Uvicorn --factory expects a callable that returns the app
+app = create_app()
+
