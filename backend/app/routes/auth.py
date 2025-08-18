@@ -50,3 +50,20 @@ def signup(body: UserCreate, db: Session = Depends(get_db)):
 def login(body: LoginIn, db: Session = Depends(get_db)):
     """
     Verify credentials and return a JWT.
+    """
+    user = db.query(User).filter(User.email == body.email).first()
+    if not user or not verify_password(body.password, user.password_hash):
+        # Obfuscate which part failed
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    token = make_token(sub=user.email)
+    return Token(access_token=token)
+
+
+@router.get("/me", response_model=UserOut)
+def me(current_user: User = Depends(get_current_user)):
+    """
+    Return the current authenticated user.
+    """
+    return current_user
+
