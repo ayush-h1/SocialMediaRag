@@ -1,63 +1,36 @@
+
 from fastapi import APIRouter, Query
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
+# services
+from app.services.vectorstore import search_local
 from app.services.youtube import search_youtube
-# If you have reddit/twitter helpers, import them too; otherwise keep stubs:
-try:
-    from app.services.reddit import search_reddit
-except Exception:  # pragma: no cover
-    def search_reddit(q: str) -> List[Dict[str, Any]]: return []
-
-try:
-    from app.services.twitter import search_twitter
-except Exception:  # pragma: no cover
-    def search_twitter(q: str) -> List[Dict[str, Any]]: return []
+from app.services.reddit import search_reddit
 
 router = APIRouter(prefix="/api", tags=["search"])
 
 @router.get("/search")
 def search(q: str = Query(..., min_length=1)) -> Dict[str, Any]:
     """
-    Aggregates results from local RAG + social sources.
-    NEVER raises – returns partial results and an 'errors' list.
+    Returns partial results even if one or more sources fail.
+    Always 200 to avoid 'Failed to fetch' in the browser.
     """
-    errors: List[str] = []
-    yt: List[Dict[str, Any]] = []
-    rd: List[Dict[str, Any]] = []
-    tw: List[Dict[str, Any]] = []
-    rag: List[Dict[str, Any]] = []
+    results: Dict[str, List[Dict[str, Any]]] = {"rag": [], "youtube": [], "reddit": []}
+    errors: Dict[str, str] = {}
 
-    # Local RAG (optional – wrap in try to avoid hard failures)
     try:
-        # from app.services.rag import rag_search
-        # rag = rag_search(q)
-        rag = []  # keep empty if you don't have RAG wired yet
-    except Exception as e:
-        errors.append(f"RAG: {e}")
+        results["rag"] = search_local(q, k=5) or []
+    except Exception as e:  # noqa: BLE001
+        errors["rag"] = str(e)
 
-    # YouTube
     try:
-        yt = search_youtube(q)
-    except Exception as e:
-        errors.append(f"YouTube: {e}")
+        results["youtube"] = search_youtube(q, max_results=5) or []
+    except Exception as e:  # noqa: BLE001
+        errors["youtube"] = str(e)
 
-    # Reddit
     try:
-        rd = search_reddit(q)
-    except Exception as e:
-        errors.append(f"Reddit: {e}")
+        results["reddit"] = search_reddit(q, limit=5) or []
+    except Exception as e:  # noqa: BLE001
+        errors["reddit"] = str(e)
 
-    # Twitter/X
-    try:
-        tw = search_twitter(q)
-    except Exception as e:
-        errors.append(f"Twitter: {e}")
-
-    return {
-        "query": q,
-        "rag": rag,
-        "youtube": yt,
-        "reddit": rd,
-        "twitter": tw,
-        "errors": errors,
-    }
+    return {"ok": True, "query": q, "results": results, "errors": errors}
