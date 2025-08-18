@@ -1,30 +1,63 @@
 from fastapi import APIRouter, Query
-from ..services.youtube import search_youtube
-from ..services.reddit import search_reddit  # keep if you have it
-# from ..services.twitter import search_twitter  # optional
+from typing import Dict, Any, List
 
-router = APIRouter(prefix="", tags=["search"])
+from app.services.youtube import search_youtube
+# If you have reddit/twitter helpers, import them too; otherwise keep stubs:
+try:
+    from app.services.reddit import search_reddit
+except Exception:  # pragma: no cover
+    def search_reddit(q: str) -> List[Dict[str, Any]]: return []
+
+try:
+    from app.services.twitter import search_twitter
+except Exception:  # pragma: no cover
+    def search_twitter(q: str) -> List[Dict[str, Any]]: return []
+
+router = APIRouter(prefix="/api", tags=["search"])
 
 @router.get("/search")
-def search(q: str = Query(..., min_length=1, max_length=200)):
+def search(q: str = Query(..., min_length=1)) -> Dict[str, Any]:
     """
-    Aggregated search. Provider errors never fail the whole request.
+    Aggregates results from local RAG + social sources.
+    NEVER raises – returns partial results and an 'errors' list.
     """
-    results = {"youtube": [], "reddit": [], "twitter": []}
+    errors: List[str] = []
+    yt: List[Dict[str, Any]] = []
+    rd: List[Dict[str, Any]] = []
+    tw: List[Dict[str, Any]] = []
+    rag: List[Dict[str, Any]] = []
 
+    # Local RAG (optional – wrap in try to avoid hard failures)
     try:
-        results["youtube"] = search_youtube(q)
+        # from app.services.rag import rag_search
+        # rag = rag_search(q)
+        rag = []  # keep empty if you don't have RAG wired yet
     except Exception as e:
-        print(f"[search] youtube failed: {e}")
+        errors.append(f"RAG: {e}")
 
+    # YouTube
     try:
-        results["reddit"] = search_reddit(q)
+        yt = search_youtube(q)
     except Exception as e:
-        print(f"[search] reddit failed: {e}")
+        errors.append(f"YouTube: {e}")
 
-    # try:
-    #     results["twitter"] = search_twitter(q)
-    # except Exception as e:
-    #     print(f"[search] twitter failed: {e}")
+    # Reddit
+    try:
+        rd = search_reddit(q)
+    except Exception as e:
+        errors.append(f"Reddit: {e}")
 
-    return results
+    # Twitter/X
+    try:
+        tw = search_twitter(q)
+    except Exception as e:
+        errors.append(f"Twitter: {e}")
+
+    return {
+        "query": q,
+        "rag": rag,
+        "youtube": yt,
+        "reddit": rd,
+        "twitter": tw,
+        "errors": errors,
+    }
