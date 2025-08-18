@@ -1,60 +1,97 @@
-# backend/app/main.py
+from __future__ import annotations
+
 import os
-import asyncio
-import logging
+import threading
+from pathlib import Path
+from typing import List
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-log = logging.getLogger("uvicorn.error")
-
-
+# ===== App factory =====
 def create_app() -> FastAPI:
-    app = FastAPI(title="SocialMediaRAG")
+    """
+    ASGI app-factory used by uvicorn with `--factory`.
 
-    # CORS
+    Keeps startup FAST so Render can detect the open port immediately.
+    Any heavy RAG/model initialization should be lazy (see vectorstore.get_vectorstore()).
+    """
+    app = FastAPI(
+        title="SocialMediaRAG",
+        version=os.getenv("APP_VERSION", "0.1.0"),
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
+    )
+
+    # --- CORS ---
+    # Comma-separated origins in env; defaults to "*"
+    raw_origins = os.getenv("CORS_ALLOW_ORIGINS", "*")
+    allow_origins: List[str] = (
+        [o.strip() for o in raw_origins.split(",")] if raw_origins else ["*"]
+    )
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*", "http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Light routers only (must be fast to import)
-    from .routes import health, auth
-    app.include_router(health.router, prefix="/api")
-    app.include_router(auth.router, prefix="/api/auth")
+    # --- Include API routers under /api ---
+    api_prefix = os.getenv("API_PREFIX", "/api")
 
-    # Serve built frontend
-    static_dir = os.path.join(os.path.dirname(__file__), "static")
-    os.makedirs(static_dir, exist_ok=True)
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+    # Import routers defensively so a missing optional module doesn't crash startup
+    def _maybe_include(module_path: str, router_name: str = "router") -> None:
+        try:
+            module = __import__(module_path, fromlist=[router_name])
+            router = getattr(module, router_name)
+            app.include_router(router, prefix=api_prefix)
+        except Exception as e:  # noqa: BLE001
+            # Log to stdout; the app should still boot
+            print(f"[main] Skipping router '{module_path}': {e}")
 
-    @app.on_event("startup")
-    async def _lazy_mount_heavy():
-        """
-        Defer heavy imports (chromadb, sentence-transformers, etc.)
-        so Uvicorn can bind to $PORT immediately.
-        """
-        def _load():
+    # Core/basic routes (add or remove as your project has them)
+    _maybe_include("app.routes.health")   # /api/health
+    _maybe_include("app.routes.auth")     # /api/auth/*
+    _maybe_include("app.routes.social")   # /api/social/* (optional)
+    _maybe_include("app.routes.search")   # /api/search
+    _maybe_include("app.routes.ingest")   # /api/ingest/*
+    _maybe_include("app.routes.trends")   # /api/trends/*
+
+    # --- Static UI ---
+    # We copy Vite's dist → backend/app/static at build time.
+    base_dir = Path(__file__).resolve().parent
+    static_dir = base_dir / "static"
+
+    if static_dir.exists():
+        # html=True serves index.html for unknown paths (SPA fallback)
+        app.mount(
+            "/", StaticFiles(directory=str(static_dir), html=True), name="static"
+        )
+    else:
+        print(f"[main] Static directory not found: {static_dir} (API only mode)")
+
+    # --- Optional non-blocking warmup of RAG in a background thread ---
+    if os.getenv("RAG_EAGER_INIT", "false").lower() in {"1", "true", "yes", "on"}:
+        def _warmup() -> None:
             try:
-                # Import here so model/vector DB loads are deferred
-                from .routes import social, search, ingest, trends
-                app.include_router(social.router, prefix="/api")
-                app.include_router(search.router, prefix="/api")
-                app.include_router(ingest.router, prefix="/api")
-                app.include_router(trends.router, prefix="/api")
-                log.info("Heavy routers mounted.")
-            except Exception:
-                log.exception("Failed to mount heavy routers")
+                print("[main] RAG eager warm-up started")
+                from app.services.vectorstore import get_vectorstore  # lazy import
+                _ = get_vectorstore()
+                print("[main] RAG eager warm-up complete")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[main] RAG eager warm-up failed: {exc}")
 
-        # Kick off in background; don’t block startup
-        asyncio.get_event_loop().call_soon(_load)
+        threading.Thread(target=_warmup, daemon=True).start()
 
     return app
 
 
-# Uvicorn --factory expects a callable that returns the app
+# Backwards compatible export for non-factory usage (NOT used by Render command)
+# If someone runs `uvicorn app.main:app`, they'll still get a FastAPI instance.
 app = create_app()
+
 
