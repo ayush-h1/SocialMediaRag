@@ -1,40 +1,52 @@
-import os, time
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from ..models.auth import LoginRequest, TokenResponse, UserOut
-import jwt
+# backend/app/routes/auth.py
+from __future__ import annotations
 
-router = APIRouter()
-security = HTTPBearer()
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
 
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
-JWT_EXPIRES_MIN = int(os.getenv("JWT_EXPIRES_MIN", "60"))
+from ..db import Base, engine, SessionLocal
+from ..models import User
+from ..schemas import LoginIn, Token, UserCreate, UserOut
+from ..security import hash_password, verify_password, make_token
+from ..deps.auth_deps import get_current_user
 
-def create_token(username: str) -> str:
-    now = int(time.time())
-    payload = {
-        "sub": username,
-        "iat": now,
-        "exp": now + JWT_EXPIRES_MIN * 60,
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+router = APIRouter(prefix="/auth", tags=["auth"])
 
-def current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    token = creds.credentials
+# Ensure tables exist (idempotent on import)
+Base.metadata.create_all(bind=engine)
+
+
+def get_db():
+    """Yield a DB session per request."""
+    db = SessionLocal()
     try:
-        data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        return data["sub"]
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        yield db
+    finally:
+        db.close()
 
-@router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest):
-    # demo: accept any non-empty username/password
-    if not payload.username or not payload.password:
-        raise HTTPException(status_code=400, detail="Username/password required")
-    token = create_token(payload.username)
-    return TokenResponse(access_token=token)
 
-@router.get("/me", response_model=UserOut)
-def me(user: str = Depends(current_user)):
-    return UserOut(username=user)
+@router.post("/signup", response_model=Token, status_code=status.HTTP_201_CREATED)
+def signup(body: UserCreate, db: Session = Depends(get_db)):
+    """
+    Create a new user and return a JWT.
+    """
+    existing = db.query(User).filter(User.email == body.email).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+
+    user = User(
+        email=body.email,
+        name=body.name,
+        password_hash=hash_password(body.password),
+    )
+    db.add(user)
+    db.commit()
+
+    token = make_token(sub=user.email)
+    return Token(access_token=token)
+
+
+@router.post("/login", response_model=Token)
+def login(body: LoginIn, db: Session = Depends(get_db)):
+    """
+    Verify credentials and return a JWT.
