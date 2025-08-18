@@ -1,42 +1,50 @@
 import os
+import logging
+from typing import List, Dict, Any
 import requests
 
-YOUTUBE_API_KEY = os.getenv("AIzaSyAIpEAAsNPUMBTSNoCgmMGr6tnKt1nRuj0", "")
+log = logging.getLogger(__name__)
 
-def search_youtube(q: str, max_results: int = 5):
+YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3/search"
+
+def search_youtube(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     """
-    Returns a list of videos. If API key is missing/invalid, returns [] and logs a warning.
+    Best-effort YouTube search. Returns [] on any error (no exceptions).
     """
-    if not YOUTUBE_API_KEY:
-        # No key configured – quietly skip
+    api_key = os.getenv("YOUTUBE_API_KEY")
+    if not api_key:
+        log.info("YOUTUBE_API_KEY not set; returning empty YouTube results.")
         return []
 
-    url = "https://www.googleapis.com/youtube/v3/search"
     params = {
         "part": "snippet",
         "type": "video",
-        "q": q,
+        "q": query,
         "maxResults": max_results,
-        "key": YOUTUBE_API_KEY,
+        "key": api_key,
     }
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(YOUTUBE_API_URL, params=params, timeout=10)
+        # If key is invalid/over quota this will be 4xx; treat as empty.
         r.raise_for_status()
         data = r.json()
-        out = []
-        for it in data.get("items", []):
-            vid = (it.get("id") or {}).get("videoId")
-            sn = it.get("snippet") or {}
-            if not vid:
-                continue
-            out.append({
-                "id": vid,
-                "title": sn.get("title", ""),
-                "channel": sn.get("channelTitle", ""),
-                "publishedAt": sn.get("publishedAt", ""),
-                "url": f"https://www.youtube.com/watch?v={vid}",
-            })
-        return out
-    except Exception as e:
-        print(f"[youtube] warn: {e}")
+    except requests.RequestException as e:
+        log.warning("YouTube search failed: %s", e)
         return []
+
+    items = []
+    for it in data.get("items", []):
+        vid = (it.get("id") or {}).get("videoId")
+        sn = it.get("snippet") or {}
+        if not vid:
+            continue
+        items.append({
+            "id": vid,
+            "title": sn.get("title"),
+            "description": sn.get("description"),
+            "channelTitle": sn.get("channelTitle"),
+            "publishedAt": sn.get("publishedAt"),
+            "thumbnail": ((sn.get("thumbnails") or {}).get("default") or {}).get("url"),
+            "url": f"https://www.youtube.com/watch?v={vid}",
+        })
+    return items
