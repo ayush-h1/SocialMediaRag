@@ -6,9 +6,7 @@ _API = "https://www.googleapis.com/youtube/v3/search"
 _API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
 
 def search_youtube(q: str, max_results: int = 5) -> List[Dict[str, Any]]:
-    """
-    Returns [] if no key or if the API errors (403/quota/etc).
-    """
+    # No key? just return []
     if not _API_KEY:
         return []
 
@@ -24,7 +22,6 @@ def search_youtube(q: str, max_results: int = 5) -> List[Dict[str, Any]]:
             },
             timeout=12,
         )
-        # If Google says no, just return empty – don't crash the endpoint
         if r.status_code != 200:
             return []
         data = r.json()
@@ -49,4 +46,3 @@ def search_youtube(q: str, max_results: int = 5) -> List[Dict[str, Any]]:
             }
         )
     return items
-
