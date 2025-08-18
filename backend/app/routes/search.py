@@ -1,31 +1,43 @@
 from fastapi import APIRouter, Query
-import os, requests
-from ..services.vectorstore import search as vs_search
+from fastapi.responses import JSONResponse
+from typing import Any, Dict, List
 
-router = APIRouter()
+# Import your services (all of these are safe/fail-open now)
+from app.services.youtube import search_youtube
+from app.services.reddit import search_reddit
+from app.services.vectorstore import search_local  # returns [] if no index
 
-def _gen_answer(query: str, context: list[str]) -> str:
-    key = os.getenv("OPENAI_API_KEY")
-    if not key or not context:
-        return "\n\n".join(context[:3])[:1500]
-    r = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {key}", "Content-Type":"application/json"},
-        json={
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role":"system","content":"Answer concisely using the context; cite snippets if helpful."},
-                {"role":"user","content": f"Q: {query}\n\nContext:\n" + "\n---\n".join(context[:8])}
-            ],
-            "temperature": 0.2
-        },
-        timeout=30
-    )
-    return r.json()["choices"][0]["message"]["content"].strip()
+router = APIRouter(prefix="/api", tags=["search"])
 
 @router.get("/search")
-def search(q: str = Query(..., min_length=2), k: int = 6):
-    hits = vs_search(q, k)
-    ctx = [h["text"] for h in hits]
-    ans = _gen_answer(q, ctx)
-    return {"hits": hits, "answer": ans}
+def search(q: str = Query(..., min_length=1, description="Query string")) -> Dict[str, Any]:
+    """
+    Aggregate search over:
+      - Local RAG index
+      - YouTube (optional API key)
+      - Reddit (public endpoint with UA)
+    This endpoint **never** raises; it returns partial results if any source fails.
+    """
+    out: Dict[str, List[Dict[str, Any]]] = {"rag": [], "youtube": [], "reddit": []}
+    errors: Dict[str, str] = {}
+
+    # Local corpus (vector store)
+    try:
+        out["rag"] = search_local(q, k=5) or []
+    except Exception as e:  # noqa: BLE001
+        errors["rag"] = str(e)
+
+    # YouTube (optional)
+    try:
+        out["youtube"] = search_youtube(q, max_results=5) or []
+    except Exception as e:  # noqa: BLE001
+        errors["youtube"] = str(e)
+
+    # Reddit (public)
+    try:
+        out["reddit"] = search_reddit(q, limit=5) or []
+    except Exception as e:  # noqa: BLE001
+        errors["reddit"] = str(e)
+
+    # Always 200 so the browser never shows "Failed to fetch"
+    return {"ok": True, "query": q, "results": out, "errors": errors}
