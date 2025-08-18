@@ -1,8 +1,10 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 
-router = APIRouter(tags=["ingest"])
+router = APIRouter(prefix="/ingest", tags=["ingest"])
 
-@router.post("/ingest/rss")
-def ingest_rss():
-    return {"ok": True, "added": 0}
+@router.post("/rss")
+def ingest_rss(feed_url: str = Body(..., embed=True, description="RSS/Atom feed URL")):
+    # Minimal stub; replace with real ingest later.
+    return {"ok": True, "added": 0, "feed_url": feed_url}
+
 
