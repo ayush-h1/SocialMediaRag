@@ -1,25 +1,16 @@
-import os
 from typing import Any, Dict, List
+import os
 import requests
 
-_API = "https://www.googleapis.com/youtube/v3/search"
-_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
+_UA = os.getenv("REDDIT_USER_AGENT", "SocialMediaRAG/0.1 by yourusername")
+_BASE = "https://www.reddit.com/search.json"
 
-def search_youtube(q: str, max_results: int = 5) -> List[Dict[str, Any]]:
-    # No key? just return []
-    if not _API_KEY:
-        return []
-
+def search_reddit(q: str, limit: int = 5) -> List[Dict[str, Any]]:
     try:
         r = requests.get(
-            _API,
-            params={
-                "part": "snippet",
-                "type": "video",
-                "q": q,
-                "maxResults": max_results,
-                "key": _API_KEY,
-            },
+            _BASE,
+            params={"q": q, "sort": "relevance", "t": "year", "limit": max(1, min(limit, 25))},
+            headers={"User-Agent": _UA},
             timeout=12,
         )
         if r.status_code != 200:
@@ -29,20 +20,19 @@ def search_youtube(q: str, max_results: int = 5) -> List[Dict[str, Any]]:
         return []
 
     items: List[Dict[str, Any]] = []
-    for it in (data or {}).get("items", []):
-        vid = (it.get("id") or {}).get("videoId")
-        sn = it.get("snippet") or {}
-        if not vid:
-            continue
+    for child in ((data or {}).get("data") or {}).get("children", []):
+        d = child.get("data") or {}
+        permalink = d.get("permalink") or ""
+        url = f"https://www.reddit.com{permalink}" if permalink.startswith("/") else (d.get("url") or "")
         items.append(
             {
-                "title": sn.get("title"),
-                "description": sn.get("description"),
-                "url": f"https://www.youtube.com/watch?v={vid}",
-                "channel": sn.get("channelTitle"),
-                "published_at": sn.get("publishedAt"),
-                "thumbnail": ((sn.get("thumbnails") or {}).get("medium") or {}).get("url"),
-                "source": "youtube",
+                "title": d.get("title"),
+                "description": d.get("selftext") or "",
+                "url": url,
+                "subreddit": d.get("subreddit"),
+                "score": d.get("score"),
+                "num_comments": d.get("num_comments"),
+                "source": "reddit",
             }
         )
     return items
