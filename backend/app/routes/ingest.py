@@ -1,94 +1,56 @@
+# backend/app/routes/ingest.py
 from __future__ import annotations
 
-from typing import Dict, List
-from fastapi import APIRouter
-from pydantic import BaseModel, HttpUrl, field_validator
+from typing import List, Dict, Any
+from datetime import datetime
 
-import requests
 import feedparser
+from fastapi import APIRouter, Body
+
+from app.services.vectorstore import add_documents
 
 router = APIRouter(tags=["ingest"])
 
-# --- In-memory store for demo purposes ---
-# key -> doc dict
-FEED_DOCS: Dict[str, Dict[str, str]] = {}
-
-UA = "SocialMediaRAG/1.0 (+https://example.com)"
-TIMEOUT = 10           # seconds per feed
-MAX_BYTES = 1_000_000  # 1 MB per feed
-
-
-class RssBody(BaseModel):
-    feeds: List[HttpUrl]
-
-    @field_validator("feeds")
-    @classmethod
-    def _not_empty(cls, v: List[HttpUrl]) -> List[HttpUrl]:
-        if not v:
-            raise ValueError("at least one feed URL is required")
-        return v
-
 
 @router.post("/ingest/rss")
-def ingest_rss(body: RssBody) -> Dict[str, object]:
+def ingest_rss(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """
-    Fetch feeds quickly (timeouts), parse with feedparser, and store entries in memory.
+    Body:
+    {
+      "feeds": ["https://hnrss.org/frontpage", "https://www.theverge.com/rss/index.xml"]
+    }
     """
+    feeds: List[str] = list(body.get("feeds") or [])
     by_feed: Dict[str, int] = {}
-    total_added = 0
+    total = 0
 
-    for url in body.feeds:
-        added = 0
-        try:
-            r = requests.get(
-                str(url),
-                headers={"User-Agent": UA, "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"},
-                timeout=TIMEOUT,
-            )
-            if r.status_code != 200:
-                print(f"[ingest] {url} -> HTTP {r.status_code}")
-                by_feed[str(url)] = 0
+    for feed_url in feeds:
+        parsed = feedparser.parse(feed_url)
+        items: List[Dict[str, Any]] = []
+        for e in parsed.entries:
+            title = (getattr(e, "title", "") or "").strip()
+            link = (getattr(e, "link", "") or "").strip()
+            summary = (getattr(e, "summary", "") or "").strip()
+            content = summary or title
+
+            if not content:
                 continue
 
-            content = r.content[:MAX_BYTES]
-            parsed = feedparser.parse(content)
-            entries = getattr(parsed, "entries", []) or []
-
-            for e in entries:
-                title = (e.get("title") or "").strip()
-                link = (e.get("link") or "").strip()
-                summary = (e.get("summary") or e.get("subtitle") or "").strip()
-
-                # dedupe key: prefer guid/id, then link+title
-                key = (e.get("id") or link or f"{url}::{title}").strip()
-                if not key:
-                    continue
-
-                FEED_DOCS[key] = {
-                    "title": title or "(untitled)",
-                    "url": link,
-                    "snippet": summary,
+            items.append(
+                {
+                    "id": link or None,
+                    "url": link or None,
                     "source": "rss",
+                    "feed": feed_url,
+                    "title": title,
+                    "text": content,
+                    "published": getattr(e, "published", None),
+                    "ingested_at": datetime.utcnow().isoformat() + "Z",
                 }
-                added += 1
+            )
 
-        except requests.Timeout:
-            print(f"[ingest] timeout: {url}")
-        except Exception as exc:
-            print(f"[ingest] {url} error: {exc}")
+        added = add_documents(items)
+        by_feed[feed_url] = added
+        total += added
 
-        by_feed[str(url)] = added
-        total_added += added
-
-    return {"ok": True, "added": total_added, "by_feed": by_feed}
-
-
-# Optional quick sanity check
-@router.post("/ingest/rss/ping")
-def ingest_ping():
-    return {"ok": True}
-
-
-
-
-
+    return {"ok": True, "added": total, "by_feed": by_feed}
