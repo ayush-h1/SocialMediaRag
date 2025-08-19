@@ -1,185 +1,97 @@
+# backend/app/services/vectorstore.py
 from __future__ import annotations
 
 import os
-import threading
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+import hashlib
+from typing import Iterable, List, Dict, Any
 
-# All heavy imports happen lazily inside get_vectorstore()
-# to keep app startup instant.
+import chromadb
+from chromadb.utils import embedding_functions
 
 
-@dataclass
-class VectorHit:
-    id: str
-    text: str
-    metadata: dict
-    distance: Optional[float] = None
+# Use a persistent folder (ephemeral on free Render, persists across app restarts but not deploys)
+CHROMA_PATH = os.getenv("CHROMA_PATH", "/opt/render/project/.chroma")
+COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "docs")
+
+_client = None
+_collection = None
 
 
-class _VectorStoreWrapper:
+def get_collection():
+    """Singleton Chroma collection with SentenceTransformer embeddings."""
+    global _client, _collection
+    if _collection is not None:
+        return _collection
+
+    # Make sure the directory exists
+    os.makedirs(CHROMA_PATH, exist_ok=True)
+
+    _client = chromadb.PersistentClient(path=CHROMA_PATH)
+
+    # Lightweight, good default
+    ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name=os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
+    )
+
+    _collection = _client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        embedding_function=ef,
+        metadata={"hnsw:space": "cosine"},
+    )
+    return _collection
+
+
+def _hash_id(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+
+def add_documents(items: Iterable[Dict[str, Any]]) -> int:
     """
-    Small helper around ChromaDB + Sentence-Transformers.
-
-    Notes:
-      - Uses a persistent Chroma client if RAG_PERSIST_DIR is set or the default folder is available.
-      - Model is configurable via RAG_MODEL_NAME (default: all-MiniLM-L6-v2).
-      - Thread-safe lazy singleton (created via get_vectorstore()).
+    items: [{id?, text, url?, source?, title?, extra...}]
+    Returns number added/upserted.
     """
+    col = get_collection()
 
-    def __init__(self, persist_dir: str, model_name: str) -> None:
-        # Lazy import here (heavy)
-        import chromadb  # noqa: WPS433
-        from chromadb.config import Settings  # noqa: WPS433
-        from chromadb.utils import embedding_functions  # noqa: WPS433
+    ids: List[str] = []
+    docs: List[str] = []
+    metas: List[Dict[str, Any]] = []
 
-        from sentence_transformers import SentenceTransformer  # noqa: WPS433
+    for it in items:
+        text = (it.get("text") or "").strip()
+        if not text:
+            continue
+        # Stable id (prefer url if provided)
+        rid = it.get("id") or it.get("url") or _hash_id(text)
+        ids.append(str(rid))
+        docs.append(text)
+        metas.append({k: v for k, v in it.items() if k not in {"id", "text"}})
 
-        self._lock = threading.RLock()
+    if not ids:
+        return 0
 
-        # Ensure directory exists (for persistent client)
-        Path(persist_dir).mkdir(parents=True, exist_ok=True)
+    col.upsert(ids=ids, documents=docs, metadatas=metas)
+    return len(ids)
 
-        # Initialize embedding model (download may happen here the first time)
-        # You can swap to a different small model if you want faster cold starts.
-        self._model = SentenceTransformer(model_name)
 
-        # Chroma client + collection
-        self._client = chromadb.PersistentClient(
-            path=persist_dir,
-            settings=Settings(
-                anonymized_telemetry=False,
-            ),
+def search(query: str, k: int = 10) -> List[Dict[str, Any]]:
+    col = get_collection()
+    res = col.query(query_texts=[query], n_results=k)
+    out: List[Dict[str, Any]] = []
+
+    ids = res.get("ids", [[]])[0]
+    docs = res.get("documents", [[]])[0]
+    metas = res.get("metadatas", [[]])[0]
+    dists = res.get("distances", [[]])[0] or []
+
+    for i, doc in enumerate(docs):
+        meta = metas[i] if i < len(metas) else {}
+        out.append(
+            {
+                "id": ids[i] if i < len(ids) else None,
+                "text": doc,
+                "score": (1 - dists[i]) if i < len(dists) else None,  # higher is better
+                "meta": meta,
+            }
         )
-        self._collection = self._client.get_or_create_collection(
-            name="documents",
-            embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=model_name
-            ),
-        )
-
-    # --------------- Public API ---------------
-
-    def add_texts(
-        self,
-        texts: Sequence[str],
-        metadatas: Optional[Sequence[dict]] = None,
-        ids: Optional[Sequence[str]] = None,
-        batch_size: int = 64,
-    ) -> int:
-        """
-        Add raw texts into the vector store.
-        """
-        if not texts:
-            return 0
-
-        with self._lock:
-            total = 0
-            # Insert in batches to keep memory in check
-            for start in range(0, len(texts), batch_size):
-                end = start + batch_size
-                batch_texts = list(texts[start:end])
-                batch_metas = list(metadatas[start:end]) if metadatas else None
-                batch_ids = list(ids[start:end]) if ids else None
-
-                self._collection.add(
-                    documents=batch_texts,
-                    metadatas=batch_metas,
-                    ids=batch_ids,
-                )
-                total += len(batch_texts)
-            return total
-
-    def query(
-        self,
-        query_text: str,
-        k: int = 5,
-        where: Optional[dict] = None,
-        include_embeddings: bool = False,
-    ) -> List[VectorHit]:
-        """
-        Perform a similarity search.
-        """
-        if not query_text:
-            return []
-
-        results = self._collection.query(
-            query_texts=[query_text],
-            n_results=k,
-            where=where,
-            include=["metadatas", "documents", "distances"]
-            + (["embeddings"] if include_embeddings else []),
-        )
-        hits: List[VectorHit] = []
-        # results fields are lists of lists (per-query); we query a single item
-        docs = results.get("documents", [[]])[0]
-        metas = results.get("metadatas", [[]])[0]
-        dists = results.get("distances", [[]])[0]
-        ids = results.get("ids", [[]])[0]
-
-        for i, text in enumerate(docs):
-            hits.append(
-                VectorHit(
-                    id=ids[i] if i < len(ids) else str(i),
-                    text=text,
-                    metadata=metas[i] if i < len(metas) else {},
-                    distance=dists[i] if i < len(dists) else None,
-                )
-            )
-        return hits
-
-    def count(self) -> int:
-        return self._collection.count()
-
-    def reset(self) -> None:
-        """
-        Danger: clears the entire collection.
-        """
-        with self._lock:
-            self._client.delete_collection("documents")
-            self._collection = self._client.get_or_create_collection(name="documents")
-
-
-# --------------- Lazy Singleton Accessor ---------------
-
-_store_singleton: Optional[_VectorStoreWrapper] = None
-_store_lock = threading.Lock()
-
-
-def get_vectorstore() -> _VectorStoreWrapper:
-    """
-    Lazily create and return the global vector store instance.
-
-    Env:
-      - RAG_MODEL_NAME   (default: 'sentence-transformers/all-MiniLM-L6-v2')
-      - RAG_PERSIST_DIR  (default: '<repo>/backend/.chroma')
-    """
-    global _store_singleton  # noqa: PLW0603
-    if _store_singleton is not None:
-        return _store_singleton
-
-    with _store_lock:
-        if _store_singleton is not None:
-            return _store_singleton
-
-        model_name = os.getenv(
-            "RAG_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2"
-        )
-
-        # Default persist dir: backend/.chroma
-        default_persist = str(Path(__file__).resolve().parents[2] / ".chroma")
-        persist_dir = os.getenv("RAG_PERSIST_DIR", default_persist)
-
-        print(
-            f"[vectorstore] Initializing with model='{model_name}', persist_dir='{persist_dir}'"
-        )
-        _store_singleton = _VectorStoreWrapper(
-            persist_dir=persist_dir,
-            model_name=model_name,
-        )
-        print(
-            f"[vectorstore] Ready | docs={_store_singleton.count()} at '{persist_dir}'"
-        )
-        return _store_singleton
+    return out
 
